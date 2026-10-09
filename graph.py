@@ -20,6 +20,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 class CRAGState(TypedDict, total=False):
     question: str
+    rewritten_query: str
     retrieved_docs: list[Document]
     retrieval_grade: Literal["correct", "ambiguous", "incorrect"]
     refined_knowledge: str
@@ -145,40 +146,65 @@ Return only the refined knowledge.
 
 
 def web_search_node(state: CRAGState) -> CRAGState:
-    question = state["question"]
+    query = state.get("rewritten_query") or state["question"]
 
-    results = search_web(question)
+    results = search_web(query)
 
     return {
         "web_results": results,
     }
 
+def rewrite_query(state: CRAGState) -> CRAGState:
+    question = state["question"]
+
+    prompt = f"""
+        You are a query rewriting component in a Corrective RAG system.
+
+        Rewrite the user's question into a concise, search-engine-friendly
+        query that will retrieve reliable and relevant information.
+
+        Requirements:
+        - Preserve the original intent.
+        - Include important keywords and entities.
+        - Resolve ambiguity when possible without inventing facts.
+        - Do not answer the question.
+        - Return only the rewritten search query.
+
+        Original question:
+        {question}
+    """
+
+    response = llm.invoke([HumanMessage(content=prompt)])
+
+    return {
+        "rewritten_query": response.content.strip(),
+    }
 
 def refine_web_knowledge(state: CRAGState) -> CRAGState:
     question = state["question"]
     web_results = state.get("web_results", "")
 
     prompt = f"""
-You are the knowledge refinement component of a Corrective RAG system.
+        You are the knowledge refinement component of a Corrective RAG system.
 
-Question:
-{question}
+        Question:
+        {question}
 
-External web knowledge:
-{web_results}
+        External web knowledge:
+        {web_results}
 
-Extract only information that is useful for answering the question.
+        Extract only information that is useful for answering the question.
 
-Requirements:
-1. Remove irrelevant search-result information.
-2. Remove redundancy.
-3. Prefer factual information.
-4. Do not invent facts.
-5. Do not answer the question directly.
-6. Return concise knowledge that can be given to the final generator.
+        Requirements:
+        1. Remove irrelevant search-result information.
+        2. Remove redundancy.
+        3. Prefer factual information.
+        4. Do not invent facts.
+        5. Do not answer the question directly.
+        6. Return concise knowledge that can be given to the final generator.
 
-Return only the refined knowledge.
-"""
+        Return only the refined knowledge.
+    """
 
     response = llm.invoke([HumanMessage(content=prompt)])
 
@@ -221,6 +247,7 @@ def build_graph():
     workflow.add_node("retrieve", retrieve)
     workflow.add_node("evaluate_retrieval", evaluate_retrieval)
     workflow.add_node("refine_knowledge", refine_knowledge)
+    workflow.add_node("rewrite_query", rewrite_query)
     workflow.add_node("web_search", web_search_node)
     workflow.add_node("refine_web_knowledge", refine_web_knowledge)
     workflow.add_node("generate", generate)
@@ -234,7 +261,7 @@ def build_graph():
         {
             "correct": "refine_knowledge",
             "ambiguous": "refine_knowledge",
-            "incorrect": "web_search",
+            "incorrect": "rewrite_query",
         },
     )
 
@@ -243,10 +270,10 @@ def build_graph():
         lambda state: state["retrieval_grade"],
         {
             "correct": "generate",
-            "ambiguous": "web_search",
+            "ambiguous": "rewrite_query",
         },
     )
-
+    workflow.add_edge("rewrite_query", "web_search")
     workflow.add_edge("web_search", "refine_web_knowledge")
     workflow.add_edge("refine_web_knowledge", "generate")
     workflow.add_edge("generate", END)
