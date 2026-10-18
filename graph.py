@@ -1,5 +1,5 @@
 from typing import Literal
-
+from typesafe_sdk import Choice, TypeSafeClient
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
 from langchain_groq import ChatGroq
@@ -45,58 +45,116 @@ def retrieve(state: CRAGState) -> CRAGState:
     }
 
 
-def evaluate_retrieval(
-    state: CRAGState,
-) -> CRAGState:
+# def evaluate_retrieval(
+#     state: CRAGState,
+# ) -> CRAGState:
+#     question = state["question"]
+#     docs = state["retrieved_docs"]
+
+#     context = "\n\n".join(
+#         f"DOCUMENT {i + 1}:\n{doc.page_content}"
+#         for i, doc in enumerate(docs)
+#     )
+
+#     prompt = f"""
+# You are a retrieval evaluator in a Corrective RAG system.
+
+# Evaluate whether the retrieved documents are useful for answering
+# the user's question.
+
+# Question:
+# {question}
+
+# Retrieved documents:
+# {context}
+
+# Classify the retrieval into exactly ONE category:
+
+# CORRECT:
+# The documents contain sufficient and directly relevant information
+# to answer the question.
+
+# AMBIGUOUS:
+# The documents contain some potentially relevant information, but
+# they are incomplete, unclear, or only partially related to the question.
+
+# INCORRECT:
+# The documents are irrelevant or do not provide useful information
+# for answering the question.
+
+# Return ONLY one word:
+# CORRECT
+# AMBIGUOUS
+# INCORRECT
+# """
+
+#     response = llm.invoke([HumanMessage(content=prompt)])
+
+#     grade = response.content.strip().upper()
+
+#     if grade not in {"CORRECT", "AMBIGUOUS", "INCORRECT"}:
+#         grade = "AMBIGUOUS"
+
+#     return {
+#         "retrieval_grade": grade.lower(),
+#     }
+
+def evaluate_retrieval(state: CRAGState) -> CRAGState:
     question = state["question"]
-    docs = state["retrieved_docs"]
+    docs = state.get("retrieved_docs", [])
+
+    # No retrieved documents means there is no local evidence to assess.
+    if not docs:
+        return {
+            "retrieval_grade": "incorrect",
+        }
 
     context = "\n\n".join(
         f"DOCUMENT {i + 1}:\n{doc.page_content}"
         for i, doc in enumerate(docs)
     )
 
-    prompt = f"""
-You are a retrieval evaluator in a Corrective RAG system.
+    with TypeSafeClient() as client:
+        response = client.system_one(
+            state={
+                "question": question,
+                "retrieved_documents": context,
+            },
+            questions={
+                "retrieval_grade": Choice(
+                    instructions=(
+                        "Evaluate how relevant and sufficient the "
+                        "retrieved documents are for answering the question. "
+                        "Judge the documents against the question, not "
+                        "whether the documents are generally informative."
+                    ),
+                    criteria={
+                        "correct": (
+                            "The retrieved documents contain directly "
+                            "relevant, sufficient evidence to answer "
+                            "the question."
+                        ),
+                        "ambiguous": (
+                            "The documents contain partially relevant "
+                            "evidence, but important details are missing, "
+                            "the evidence is unclear, or relevance is mixed."
+                        ),
+                        "incorrect": (
+                            "The documents are irrelevant or provide "
+                            "no useful evidence for answering the question."
+                        ),
+                    },
+                ),
+            },
+        )
 
-Evaluate whether the retrieved documents are useful for answering
-the user's question.
+    grade = response.choices["retrieval_grade"].choice.lower()
 
-Question:
-{question}
-
-Retrieved documents:
-{context}
-
-Classify the retrieval into exactly ONE category:
-
-CORRECT:
-The documents contain sufficient and directly relevant information
-to answer the question.
-
-AMBIGUOUS:
-The documents contain some potentially relevant information, but
-they are incomplete, unclear, or only partially related to the question.
-
-INCORRECT:
-The documents are irrelevant or do not provide useful information
-for answering the question.
-
-Return ONLY one word:
-CORRECT
-AMBIGUOUS
-INCORRECT
-"""
-
-    response = llm.invoke([HumanMessage(content=prompt)])
-
-    grade = response.content.strip().upper()
-
-    if grade not in {"CORRECT", "AMBIGUOUS", "INCORRECT"}:
-        grade = "AMBIGUOUS"
+    if grade not in {"correct", "ambiguous", "incorrect"}:
+        raise ValueError(f"Unexpected JEV retrieval grade: {grade}")
 
     return {
-        "retrieval_grade": grade.lower(),
+        "retrieval_grade": grade,
     }
 
 
